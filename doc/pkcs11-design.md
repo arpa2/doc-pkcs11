@@ -31,6 +31,24 @@ Some issues below haven't been fully worked out, and they are open for discussio
   * Mozilla is very explicit about its support of PKCS #11.  You can add "security devices" which are PKCS #11 libraries, and the user can select certificates off of it.
   * Kerberos is a system of shared secrets that are dispensed by a realm's KDC.  We rely on Kerberos, and even have plans of using [Kerberos over NFC](https://github.com/arpa2/kerberos2nfc), to easily pass certificates to mobile devices.  The common interface over which Kerberos is used is [GSS-API](https://tools.ietf.org/html/rfc2743) which we will use too; an alternative might be our own work on [TLS-KDH](http://tls-kdh.arpa2.net) which offers a rather modest TLS implementation.
 
+
+## Naming the Game
+
+Remote PKCS #11 is just a technical name, which nobody will like.  We need
+a better one.
+
+This project will be called **keehive**.  Nobody knows this word yet, not even
+big G or big M.  And everybody who pronounces it can tell what it does, sort of.
+
+So, the PKCS #11 library on the client would be `libkeehive.so` and the dæmon
+on the server may be called just `keehive` and we can use many terrible puns;
+as long as they don't interfere with pragmatic usability of the tools and code.
+
+Obviously though, the main process for the keehive could be called `queen`, and
+any processes in its PKCS #11 backend libraries would be her `drones` or
+`workers`.
+
+
 ## User Experience Design
 
 PKCS #11 applications tend to allow the configuration of a library, selection of a token inside it, and configuration of a PIN for access.  Take a look at Mozilla's "security devices" for a graphical example.
@@ -38,6 +56,8 @@ PKCS #11 applications tend to allow the configuration of a library, selection of
 We want the user to be unaware of the PKCS #11 layering, so the IdentityHub can add group memberships and by that, any keys available to the group, without the user's prior knowledge.  Also, removal of a PKCS #11 layer for a group should not involve any user action.
 
 This is why we want layering for PKCS #11, even though the PKCS #11 model allows for access to multiple libraries and multiple tokens under management of each library.
+
+We do want users to select their authorisation identity, or at least should they be allowed to do this.  This could be useful to "step down" to an alias or to migrate to one of their pseudonyms, so as to constrain the possibilities over the given link.  There are a few places where this could be done: (1) based on the slot description, which should maybe mention Remote PKCS #11 instead, (2) based on the token label, which is a perfect place for a user identity, (3) in the PIN (see below).  The token label would seem to be the best place, as that is usually selected when a Remote PKCS #11 library is setup in an application.  **TODO:** It also occurs in the `pkcs11:` URI scheme, which may or may not turn out to be helpful.
 
 We want the user to have software installed for access over Remote PKCS #11, and access the public keys as part of their Single Sign-On through Kerberos.  The service used will be `pkcs11/host.name@REALM`, which is to be configured as part of the Remote PKCS #11 setup.
 
@@ -76,8 +96,8 @@ PKCS #11 is designed as an API, meant for local use.  Using it remotely is only 
 The following protocol layers are good to support in a switchable manner:
 
   * **RPC** is a mapping of PKCS #11 API calls to/from DER encoding; the encoding should be switchable so future extensions are possible.  It may prove efficient to parse the RPC format only partially in the Remote PKCS #11 dæmon, to accommodate validation and routing only, and have the rest of the work done in the layers formed by PKCS #11 libraries.  (An alternative to partial parsing might be full parsing, and passing along the parsed [overlay structure](https://github.com/vanrein/quick-der/blob/master/USING.MD) with the data being pointed into.)
-  * **Secure Layer** encodes the RPC format between client and server in a secure manner.  Secure means authenticated and encrypted for the Remote PKCS #11 Service.  The initial design would cover GSS-API, but future switchable alternatives may be added for TLS-KDH.  With Kerberos, we can and should use mutual authentication.
-  * **Transport** is the client's choice of TCP and SCTP.  In addition, we shall use AMQP 1.0 because that allows for queueing of work while a component is down, which is incredibly useful in terms of operations of the complex IdentityHub.  We should start with TCP, the rest is extra and may be captured in a generic dæmon rather than specific for the Remote PKCS #11 Service.
+  * **Secure Layer** encodes the RPC format between client and server in a secure manner.  Secure means authenticated and encrypted for the Remote PKCS #11 Service.  The initial design would cover GSS-API, but future switchable alternatives may be added for TLS-KDH.  With Kerberos, we can and should use mutual authentication.  (**TODO:** We might use a slightly different format for asynchronous messaging such as over AMQP, where we provide the might authenticate while providing a [subkey](https://tools.ietf.org/html/rfc4120#section-5.5.1) and follow with [information encrypted](https://tools.ietf.org/html/rfc4120#section-5.7) under that subkey.  Not sure if this also works in GSS-API, but it probably is.  Only the proper recipient could read/process this kind of submissions, but there would be no need for a session concept.  Also have a look into [response formalisms](https://tools.ietf.org/html/rfc4120#section-5.5.2) though; this should probably use the KDC-supplied session key but mention the same subkey, to show that it mentioned to decode it.  The sender can store a hashed version of the subkey, which is more secure than storing it literally.  The reply can once more encrypt the added part with the subkey.  We might also decide to use this mechanism for all traffic.)
+  * **Transport** is the client's choice of TCP and SCTP.  In addition, we shall use AMQP 1.0 because that allows for queueing of work while a component is down, which is incredibly useful in terms of operations of the complex IdentityHub.  We should start with TCP, the rest is extra and may be captured in a generic dæmon rather than specific for the Remote PKCS #11 Service.  TCP has no framing, so we should either recognise the DER length after [loading the initial 5-6 bytes](https://github.com/vanrein/lillydap/blob/26c1bbea1cf9d40f33ea5bba7450ec52d12367dd/lib/derbuf.c#L41), or we could have less self-respect and load a big-endian 32-bit number with the length that follows.  IMHO, the second really needs to be argued for.  With SCTP and AMQP we have framing, so we need not worry about this.  SCTP allows requests to arrive out-of-order when this is more efficient, so it improves concurrency.  Note that SCTP can be run over [UDP tunnels](https://tools.ietf.org/html/rfc6951), using port 9899 on both ends; this is integrated in the socket API, but individual sockets either use a tunnel or not.
 
 *Suggestion:* It may be easier and more interesting work, and certainly more awesome, to make an RPC mapper from ASN.1 to stub/skeleton code in C, using a Python script.  This would match the style (but not necesserily the evolved structure) of `asn2quickder`, and could be added to Quick DER as a generic tool.  Such an RPC mapping would need to take the mentioned partial mapping into account, perhaps based on the names and types in function prototypes.
 
@@ -93,7 +113,7 @@ The reason for the separation of libraries into processes is to avoid security c
 
 There is no need to split the uses of a PKCS #11 library (version) to access a variety of tokens; a given PKCS #11 library (version) may be assumed to have its own interest at heart, and keep various sessions for various users open at the same time.  Libraries can open multiple sessions, and should have no problem opening them on various slots.  Slots can each hold zero or one token, and a token represents the key material of an individual user or group.
 
-**TODO:** The interaction between sessions is confusing, since rights are shared.  It looks like it will be necessary to have a separate process for readonly use (`CKS_RW_USER_FUNCTIONS`) and read/write use (`CKS_RO_USER_FUNCTIONS`).
+**TODO:** The interaction between sessions is confusing, since rights are shared.  It looks like it will be necessary to have a separate process for readonly use (`CKS_RO_USER_FUNCTIONS`) and read/write use (`CKS_RW_USER_FUNCTIONS`) but the latter would only work when permitted by Diameter/SCTP; for instance within groups, a member may not always be granted write access; write access means that keys may be added or removed.
 
 Layering combines multiple PKCS #11 libraries, and this can only be done in the overall Remote PKCS #11 dæmon.  Since each library can pick its own `CK_OBJECT_HANDLE` values, it will be necesssary to create a mapping.  There is no reason why a library-serving process cannot make its identities map into a reserved range, but that would require the overal dæmon to check whether they do not go outside their allocated ranges.  It may be easier to do it all in the central component.
 
@@ -120,7 +140,7 @@ Every token resides under a single realm, namely that of the client.  It is iden
 
 The `C_Login()` call is surprisingly simple; it constitutes of entering a PIN, but not a user name!  The idea is that a token is bound to a user, after all.  But what we would like to do, is allow the user to select a user identity for a particular use, and be authorised for that.  It is not practical to demand this from the user's Kerberos setup.
 
-Since we run over a secure transport, and authenticate the client over that, we can safely assume that the client is who we want it to be, founded on much better security than the PKCS #11 PIN.  As a result, the PIN is a "free slot" for us to use for exchanging information.  Tools that use PKCS #11 commonly request a fixed, textual secret and pass it on literally.  The standard imposes no restrictions, so we will use a format such as `authz_as_user+fwd_pin_data` where the `authz_as_user` is the user identity to authorise as.  The Remote PKCS #11 dæmon makes a backcall over Diameter/SCTP to authorise the requested change of identity from the one provided over Kerberos to this one.  **TODO:** There is no reason to support for a change of domain/realm.
+Since we run over a secure transport, and authenticate the client over that, we can safely assume that the client is who we want it to be, founded on much better security than the PKCS #11 PIN.  As a result, the PIN is a "free slot" for us to use for exchanging information.  Tools that use PKCS #11 commonly request a fixed, textual secret and pass it on literally.  The standard imposes no restrictions, so we will use a format such as `authz_as_user+fwd_pin_data` where the `authz_as_user` is the user identity to authorise as.  The Remote PKCS #11 dæmon makes a backcall over Diameter/SCTP to authorise the requested change of identity from the one provided over Kerberos to this one.  **TODO:** There is no reason to support for a change of domain/realm.  **TODO:** It may be a better idea to put `authz_as_user@domain.name` in the token label, and reserve the PIN field for `fwd_pin_data` (and allow the `+` symbol to occur in it).
 
 The central control over PKCS #11 from the key management service in IdentityHub also follows the authorisation mechanism; its master access would however be configured instead of require an authorisiation backcall over Diameter/SCTP.  Sort of like a `root` user for a given domain, but as a Kerberos principal name for each realm.  **TODO:** These sessions are also mere `CKS_RW_USER_FUNCTIONS` sessions; any token administration will be handled by independent software operating on the PKCS #11 backend libraries.
 
